@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy.signal as sig
 
-from filters import MonoLMS, MonoNLMS, MonoRLS, MultiChannelLMS, MultiChannelNLMS, MultiChannelRLS
+from filters import MonoLMS, MonoNLMS, MonoRLS, MultiChannelLMS, MultiChannelNLMS, MultiChannelRLS, PCA_Filter
 from wrapper import Wrapper
 
 import time
@@ -36,7 +36,6 @@ DATA_PATH = os.path.join(
     "physionet.org", "files", "fecgsyndb", "1.0.0",
     _SUBJECT, _SNR, _RECORD,
 )
-
 
 # =============================================================================
 # Tests
@@ -130,6 +129,145 @@ class Tests:
         if self.d_pure is not None:
             print(
                 f"[INFO] Loaded pure channel '{pure_name}' ch={d_ch}, "
+                f"samples={len(self.d_pure)}"
+            )
+
+
+    def load_data_multi(
+        self,
+        *,
+        x_chs: list[int],
+        d_ch: int,
+        num_samples: int,
+        noise: bool = True,
+        pure_name: str = "fecg1",
+    ):
+        """
+        Multichannel variant of load_data.
+
+        Loads the full mixed signal matrix and extracts:
+          - self.X  : (T, M) matrix of M reference channels
+          - self.d  : (T,) desired channel
+          - self.x  : first reference channel as a 1D array (for plotting)
+          - self.x_ch : set to x_chs[0] so plot_results can label the axis
+
+        Parameters
+        ----------
+        x_chs       : list of column indices to use as reference channels
+        d_ch        : column index of the desired (abdominal) channel
+        num_samples : samples to load
+        noise       : include noise component records
+        pure_name   : pure fetal record suffix for ground-truth comparison
+        """
+        # Use d_ch as the nominal x_ch for the Wrapper call; we'll pull the
+        # full matrix ourselves directly from Xsum afterward.
+        Xsum, fs, _, d = self.wrapper.get_mixed_ecg(
+            x_ch=x_chs[0],
+            d_ch=d_ch,
+            num_samples=num_samples,
+            noise=noise,
+        )
+
+        self.Xsum  = Xsum
+        self.fs    = fs
+        self.d     = d
+        self.d_ch  = d_ch
+        self.x_chs = x_chs
+        self.x_ch  = x_chs[0]          # used by plot_results for the axis label
+
+        # Extract all reference channels as a (T, M) matrix
+        self.X = Xsum[:len(d), x_chs]  # trim to loaded length in case of edge cases
+        self.x = self.X[:, 0]          # first channel as 1D for plotting
+
+        self.pure_name = pure_name
+        try:
+            self.d_pure = self.wrapper.get_pure_channel(
+                name=pure_name, ch=d_ch, num_samples=num_samples
+            )
+        except Exception as ex:
+            print(f"[WARN] Could not load pure channel '{pure_name}' ch={d_ch}: {ex}")
+            self.d_pure = None
+
+        print(
+            f"[INFO] Loaded multichannel ECG — shape={Xsum.shape}, fs={fs} Hz, "
+            f"x_chs={x_chs}, d_ch={d_ch}, samples={len(d)}, noise={noise}"
+        )
+        if self.d_pure is not None:
+            print(
+                f"[INFO] Loaded pure channel '{pure_name}' ch={d_ch}, "
+                f"samples={len(self.d_pure)}"
+            )
+
+    def load_data_pca(
+        self,
+        *,
+        a_chs: list[int],
+        num_samples: int,
+        noise: bool = True,
+        pure_name: str = "fecg1",
+    ):
+        """
+        Load abdominal channels for PCA-based fECG extraction.
+
+        Unlike the adaptive filter loaders, PCA does not use a separate reference
+        channel — it operates directly on the abdominal array. All channels in
+        a_chs are treated as the signal matrix A of shape (T, M).
+
+        In fecgsyndb the abdominal channels are 0–3 (indices into the 34-channel
+        mixed signal). These carry a mixture of maternal ECG, fetal ECG, and
+        noise. PCA projects out the dominant (maternal) components and returns
+        the residual as the fetal estimate.
+
+        Sets
+        ----
+        self.X    : (T, M) abdominal channel matrix  ← fed to PCA as x_block
+        self.d    : (T,)   first abdominal channel   ← used by plot/sanity harness
+        self.x    : same as self.d                   ← for plot_results axis label
+        self.x_ch : a_chs[0]
+        self.x_chs: a_chs
+
+        Parameters
+        ----------
+        a_chs       : list of abdominal channel indices (e.g. [0, 1, 2, 3])
+        num_samples : number of samples to load
+        noise       : include noise component records
+        pure_name   : pure fetal record suffix for ground-truth comparison
+        """
+        Xsum, fs, _, _ = self.wrapper.get_mixed_ecg(
+            x_ch=a_chs[0],
+            d_ch=a_chs[0],
+            num_samples=num_samples,
+            noise=noise,
+        )
+
+        self.Xsum  = Xsum
+        self.fs    = fs
+        self.x_chs = a_chs
+        self.x_ch  = a_chs[0]
+        self.d_ch  = a_chs[0]
+
+        T = Xsum.shape[0]
+        self.X = Xsum[:T, a_chs]             # (T, M) — all abdominal channels
+        self.d = Xsum[:T, a_chs[0]].copy()   # (T,)  — first abdominal channel
+        self.x = self.d.copy()               # same, used for plot axis label
+
+        self.pure_name = pure_name
+        try:
+            # Load pure fetal for the first abdominal channel
+            self.d_pure = self.wrapper.get_pure_channel(
+                name=pure_name, ch=a_chs[0], num_samples=num_samples
+            )
+        except Exception as ex:
+            print(f"[WARN] Could not load pure channel '{pure_name}' ch={a_chs[0]}: {ex}")
+            self.d_pure = None
+
+        print(
+            f"[INFO] Loaded PCA abdominal block — Xsum shape={Xsum.shape}, fs={fs} Hz, "
+            f"a_chs={a_chs}, samples={T}, noise={noise}"
+        )
+        if self.d_pure is not None:
+            print(
+                f"[INFO] Loaded pure channel '{pure_name}' ch={a_chs[0]}, "
                 f"samples={len(self.d_pure)}"
             )
 
@@ -244,70 +382,58 @@ class Tests:
 
         return y_out, e_out, y_raw_out, e_raw_out
 
-    def load_data_multi(
+    def block_process_pca(
         self,
-        *,
-        x_chs: list[int],
-        d_ch: int,
-        num_samples: int,
-        noise: bool = True,
-        pure_name: str = "fecg1",
-    ):
+        filter_obj: PCA_Filter,
+        A: np.ndarray,
+        block_size: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
-        Multichannel variant of load_data.
+        PCA-specific block processor.
 
-        Loads the full mixed signal matrix and extracts:
-          - self.X  : (T, M) matrix of M reference channels
-          - self.d  : (T,) desired channel
-          - self.x  : first reference channel as a 1D array (for plotting)
-          - self.x_ch : set to x_chs[0] so plot_results can label the axis
+        PCA is a batch method: it needs to see a contiguous window of data to
+        compute a meaningful covariance structure. Unlike adaptive filters, a
+        very small block_size hurts quality (too few samples to separate maternal
+        from fetal via SVD). This function intentionally uses block_size as a
+        hint for the window width; callers should pass a large value (e.g. the
+        full signal length or at least 1–2 s worth of samples).
+
+        The filter's process_block() signature is called with:
+          x_block = A[idx:end, :]   (T_blk, M) abdominal slice
+          d_block = zeros(T_blk,)   (ignored by PCA_Filter; present for API compat)
 
         Parameters
         ----------
-        x_chs       : list of column indices to use as reference channels
-        d_ch        : column index of the desired (abdominal) channel
-        num_samples : samples to load
-        noise       : include noise component records
-        pure_name   : pure fetal record suffix for ground-truth comparison
+        filter_obj : PCA_Filter instance
+        A          : (T, M) float array — all abdominal channels
+        block_size : samples per PCA window; use a large value (>= fs * 1.0)
+
+        Returns
+        -------
+        y_out : (T,) maternal estimate concatenated across windows
+        e_out : (T,) fetal estimate concatenated across windows
         """
-        # Use d_ch as the nominal x_ch for the Wrapper call; we'll pull the
-        # full matrix ourselves directly from Xsum afterward.
-        Xsum, fs, _, d = self.wrapper.get_mixed_ecg(
-            x_ch=x_chs[0],
-            d_ch=d_ch,
-            num_samples=num_samples,
-            noise=noise,
-        )
+        A = np.asarray(A, dtype=float)
+        if A.ndim == 1:
+            A = A[:, np.newaxis]
 
-        self.Xsum  = Xsum
-        self.fs    = fs
-        self.d     = d
-        self.d_ch  = d_ch
-        self.x_chs = x_chs
-        self.x_ch  = x_chs[0]          # used by plot_results for the axis label
+        T = A.shape[0]
+        y_out = np.zeros(T, dtype=float)
+        e_out = np.zeros(T, dtype=float)
 
-        # Extract all reference channels as a (T, M) matrix
-        self.X = Xsum[:len(d), x_chs]  # trim to loaded length in case of edge cases
-        self.x = self.X[:, 0]          # first channel as 1D for plotting
+        idx = 0
+        while idx < T:
+            end = min(idx + block_size, T)
+            blk = A[idx:end, :]
+            d_ref = np.asarray(self.d, dtype=float).ravel()
 
-        self.pure_name = pure_name
-        try:
-            self.d_pure = self.wrapper.get_pure_channel(
-                name=pure_name, ch=d_ch, num_samples=num_samples
-            )
-        except Exception as ex:
-            print(f"[WARN] Could not load pure channel '{pure_name}' ch={d_ch}: {ex}")
-            self.d_pure = None
+            y_blk, e_blk = filter_obj.process_block(blk, d_ref[idx:end])
+            y_out[idx:end] = y_blk
+            e_out[idx:end] = e_blk
+            idx = end
 
-        print(
-            f"[INFO] Loaded multichannel ECG — shape={Xsum.shape}, fs={fs} Hz, "
-            f"x_chs={x_chs}, d_ch={d_ch}, samples={len(d)}, noise={noise}"
-        )
-        if self.d_pure is not None:
-            print(
-                f"[INFO] Loaded pure channel '{pure_name}' ch={d_ch}, "
-                f"samples={len(self.d_pure)}"
-            )
+        return y_out, e_out
+
 
     # =========================================================================
     # Sanity checks
@@ -351,9 +477,6 @@ class Tests:
             assert len(y_raw) == len(e_raw) == len(d), "Length mismatch in raw outputs."
 
             max_err = np.nanmax(np.abs(e_raw - (d - y_raw)))
-            # Uncomment to enforce strictly:
-            # assert max_err < 1e-6, f"RAW e != d - y; max error = {max_err:.2e}"
-
             print(f"[OK] Basic tests passed (raw identity max_err={max_err:.2e}).")
             return
 
@@ -362,6 +485,56 @@ class Tests:
             raise AssertionError("e is all ~0; unexpected for a non-trivial input.")
 
         print("[OK] Basic tests passed (identity check skipped — outputs may be post-filtered).")
+
+    def basic_tests_pca(
+        self,
+        y: np.ndarray,
+        e: np.ndarray,
+        tol: float = 1e-9,
+    ):
+        """
+        Sanity checks specific to PCA output.
+
+        PCA does not satisfy e == d - y sample-by-sample (it is a batch method),
+        so we only check for finiteness and non-triviality.
+
+        Parameters
+        ----------
+        y   : (T,) maternal estimate
+        e   : (T,) fetal estimate (residual)
+        tol : threshold below which a signal is considered identically zero
+        """
+        y = np.asarray(y, dtype=float).ravel()
+        e = np.asarray(e, dtype=float).ravel()
+
+        if len(y) != len(e):
+            raise AssertionError(f"Length mismatch: len(y)={len(y)}, len(e)={len(e)}.")
+
+        if not (np.isfinite(y).all() and np.isfinite(e).all()):
+            raise RuntimeError("NaN/Inf in PCA outputs — check input data.")
+
+        if not np.any(np.abs(y) > tol):
+            raise AssertionError(
+                "PCA y (maternal estimate) is all ~0. "
+                "Check that k < num_a_channels and the input block has enough samples."
+            )
+
+        if not np.any(np.abs(e) > tol):
+            raise AssertionError(
+                "PCA e (fetal estimate) is all ~0. "
+                "The residual is zero — all components may have been suppressed. "
+                "Try reducing k."
+            )
+
+        # Report energy ratio: maternal / total (should be >> fetal / total)
+        E_total    = float(np.var(y) + np.var(e))
+        E_maternal = float(np.var(y))
+        E_fetal    = float(np.var(e))
+        print(
+            f"[OK] PCA basic tests passed. "
+            f"Energy: maternal={E_maternal:.3e}, fetal={E_fetal:.3e}, "
+            f"maternal_fraction={E_maternal / (E_total + 1e-30):.3f}"
+        )
 
     # =========================================================================
     # Cross-correlation diagnostics
@@ -560,6 +733,133 @@ class Tests:
         fig2.tight_layout()
         plt.show()
 
+    def plot_results_pca(
+        self,
+        y: np.ndarray,
+        e: np.ndarray,
+        *,
+        title: str,
+        a_chs: list[int],
+        start: float = 0.0,
+        end: float = 40.0,
+    ):
+        """
+        Plot PCA results.
+
+        Displays all abdominal input channels, then the maternal estimate (y)
+        and fetal estimate (e), plus the ground-truth pure fetal if available.
+        Since PCA has no single scalar reference x[n], we show all M abdominal
+        channels stacked in the upper panel instead.
+
+        Parameters
+        ----------
+        y      : (T,) maternal estimate
+        e      : (T,) fetal estimate (residual)
+        title  : figure title string
+        a_chs  : list of abdominal channel indices (for axis labels)
+        start  : plot start time in seconds
+        end    : plot end time in seconds
+        """
+        if self.fs is None:
+            raise RuntimeError("fs not set — call load_data_pca() first.")
+        if end <= start:
+            raise ValueError(f"end ({end}) must be greater than start ({start}).")
+
+        T = len(e)
+        start_idx = int(max(0.0, start) * self.fs)
+        end_idx   = int(min(end * self.fs, T))
+        if start_idx >= T:
+            raise ValueError(f"start={start}s exceeds signal length ({T / self.fs:.2f}s).")
+        end_idx = max(end_idx, start_idx + 1)
+
+        t = np.arange(start_idx, end_idx) / self.fs
+        have_pure = (self.d_pure is not None) and (len(self.d_pure) >= end_idx)
+
+        M = self.X.shape[1]
+        # Rows: M abdominal channels + maternal estimate + fetal estimate [+ pure fetal]
+        nrows = M + 2 + (1 if have_pure else 0)
+
+        LABEL_FS = 9
+        TICK_FS  = 8
+        TITLE_FS = 10
+        LW       = 0.8
+
+        # Color palette: abdominal channels in shades of blue, then green/red/purple
+        blues  = plt.cm.Blues(np.linspace(0.4, 0.9, M))
+        C_EST  = "#4dac26"
+        C_RES  = "#b2182b"
+        C_PURE = "#762a83"
+
+        fig, axes = plt.subplots(nrows, 1, figsize=(10, 1.3 * nrows), sharex=True)
+        if nrows == 1:
+            axes = [axes]
+        fig.suptitle(title, fontsize=TITLE_FS, y=0.98)
+
+        def _plot(ax, sig, label, color):
+            ax.plot(t, sig[start_idx:end_idx], color=color, linewidth=LW)
+            ax.set_ylabel(label, fontsize=LABEL_FS, labelpad=4)
+            ax.tick_params(labelsize=TICK_FS)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+        # Abdominal input channels
+        for m in range(M):
+            _plot(axes[m], self.X[:, m], f"$a_{m}[n]$ (ch {a_chs[m]})", blues[m])
+
+        # Maternal and fetal estimates
+        _plot(axes[M],     y, "$y[n]$ est. maternal", C_EST)
+        _plot(axes[M + 1], e, "$e[n]$ fetal est.",    C_RES)
+
+        if have_pure:
+            _plot(axes[M + 2], self.d_pure, "pure fetal (ref.)", C_PURE)
+
+        axes[-1].set_xlabel("Time (s)", fontsize=LABEL_FS)
+        fig.tight_layout()
+        plt.show()
+
+        # --- STFT panel ---
+        e_seg = np.asarray(e[start_idx:end_idx], dtype=float).ravel()
+        nperseg  = int(0.25 * self.fs)
+        noverlap = nperseg // 2
+
+        f_e, tt_e, Z_e = sig.stft(
+            e_seg, fs=self.fs, nperseg=nperseg, noverlap=noverlap,
+            boundary=None, window="hamming"
+        )
+        S_e = 20.0 * np.log10(np.abs(Z_e) + 1e-12)
+
+        if have_pure:
+            p_seg = np.asarray(self.d_pure[start_idx:end_idx], dtype=float).ravel()
+            f_p, tt_p, Z_p = sig.stft(
+                p_seg, fs=self.fs, nperseg=nperseg, noverlap=noverlap, boundary=None
+            )
+            S_p = 20.0 * np.log10(np.abs(Z_p) + 1e-12)
+
+            fig2, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+            im1 = ax1.pcolormesh(tt_e + start, f_e, S_e, shading="auto")
+            ax1.set_ylabel("Frequency (Hz)", fontsize=LABEL_FS)
+            ax1.set_title("STFT — PCA fetal estimate $e[n]$", fontsize=LABEL_FS)
+            ax1.tick_params(labelsize=TICK_FS)
+            fig2.colorbar(im1, ax=ax1, label="Magnitude (dB)")
+
+            im2 = ax2.pcolormesh(tt_p + start, f_p, S_p, shading="auto")
+            ax2.set_ylabel("Frequency (Hz)", fontsize=LABEL_FS)
+            ax2.set_title("STFT — pure fetal (reference)", fontsize=LABEL_FS)
+            ax2.set_xlabel("Time (s)", fontsize=LABEL_FS)
+            ax2.tick_params(labelsize=TICK_FS)
+            fig2.colorbar(im2, ax=ax2, label="Magnitude (dB)")
+        else:
+            fig2, ax = plt.subplots(figsize=(8, 2.5))
+            im = ax.pcolormesh(tt_e + start, f_e, S_e, shading="auto")
+            ax.set_title("STFT — PCA fetal estimate $e[n]$ (pure unavailable)", fontsize=LABEL_FS)
+            ax.set_ylabel("Frequency (Hz)", fontsize=LABEL_FS)
+            ax.set_xlabel("Time (s)", fontsize=LABEL_FS)
+            ax.tick_params(labelsize=TICK_FS)
+            fig2.colorbar(im, ax=ax, label="Magnitude (dB)")
+
+        fig2.tight_layout()
+        plt.show()
+
     # =========================================================================
     # High-level filter runner
     # =========================================================================
@@ -643,13 +943,13 @@ class Tests:
         pure_name   = "fecg1"  # pure fetal record suffix for ground-truth comparison
 
         # LMS config
-        RUN_LMS  = False
+        RUN_LMS  = True
         taps_lms = 512
         mu_lms   = 9.25e-3
         t0_lms, t1_lms = 15.0, 25.0
 
         # NLMS config
-        RUN_NLMS    = False
+        RUN_NLMS    = True
         taps_nlms   = 512
         mu_nlms     = 0.88
         eps_nlms    = 1e-7      # regularization — prevents divide-by-zero on silent input
@@ -825,13 +1125,13 @@ class Tests:
         pure_name   = "fecg1"
 
         # MultiChannelLMS config
-        RUN_MC_LMS  = False
+        RUN_MC_LMS  = True
         taps_mc_lms = 512          # taps per channel — keep N*M small for LMS
         mu_mc_lms   = 1.85e-3        # must be smaller than mono: power scales with M*N
         t0_mc_lms, t1_mc_lms = 15.0, 25.0
 
         # MultiChannelNLMS config
-        RUN_MC_NLMS  = False
+        RUN_MC_NLMS  = True
         taps_mc_nlms = 512         # taps per channel
         mu_mc_nlms   = 1.88      # NLMS normalizes automatically — same range as mono
         eps_mc_nlms  = 1e-7
@@ -839,7 +1139,7 @@ class Tests:
 
         # MultiChannelRLS config — the primary workhorse
         # Memory: P is (N*M)^2 floats. N=64, M=4 -> 256^2 * 8B = 0.5 MB (fast)
-        RUN_MC_RLS   = False
+        RUN_MC_RLS   = True
         taps_mc_rls  = 128         # taps per channel; total NM = 64*4 = 256
         lam_mc_rls   = 0.9991
         delta_mc_rls = 2e-2
@@ -911,6 +1211,150 @@ class Tests:
                 do_corr=True,
             )
 
+    # =========================================================================
+    # PCA filter runner
+    # =========================================================================
+
+    def run_filter_pca(
+        self,
+        *,
+        filter_name: str,
+        filter_obj: PCA_Filter,
+        block_size: int,
+        start: float = 0.0,
+        end: float = 40.0,
+        do_plot: bool = True,
+        do_corr: bool = True,
+    ) -> dict:
+        """
+        PCA counterpart to run_filter_multi.
+
+        Drives block_process_pca() with self.X (the abdominal channel matrix
+        set by load_data_pca()), then runs sanity checks, cross-correlations,
+        and plotting.
+
+        Key differences from run_filter / run_filter_multi
+        --------------------------------------------------
+        - Input: self.X (abdominal channels), NOT a thoracic reference.
+        - Sanity: uses basic_tests_pca() — no sample-by-sample e == d-y identity.
+        - Plotting: uses plot_results_pca() — shows all M abdominal channels.
+        - block_size should be LARGE (>= 1–2 s of data). The default entry point
+          sets block_size = num_samples so PCA sees the entire signal at once.
+
+        Requires load_data_pca() to have been called first.
+        """
+        if self.X is None:
+            raise RuntimeError(
+                "self.X is not set — call load_data_pca() before run_filter_pca()."
+            )
+
+        t_start = time.perf_counter()
+        y, e = self.block_process_pca(filter_obj, self.X, block_size=block_size)
+        elapsed_s = time.perf_counter() - t_start
+        per_sample_us = elapsed_s / len(self.d) * 1e6
+
+        self.basic_tests_pca(y, e)
+
+        corr = None
+        if do_corr:
+            corr = self.compute_cross_correlations(y, e, max_lag_s=0.2)
+            print(f"\n[{filter_name}] Per-sample latency: {per_sample_us:.3f} µs")
+            print(f"[{filter_name}] Cross-correlation peaks (normalized):")
+            for k, v in corr.items():
+                print(f"    {k:>25s}: {v}")
+
+        if do_plot:
+            self.plot_results_pca(
+                y, e,
+                title=(
+                    f"{filter_name} | record={self.wrapper.record_base} "
+                    f"| k={filter_obj.k} | a_chs={self.x_chs}"
+                ),
+                a_chs=self.x_chs,
+                start=start,
+                end=end,
+            )
+
+        return {"y": y, "e": e, "corr": corr}
+
+    # =========================================================================
+    # PCA entry point
+    # =========================================================================
+
+    def run_tests_pca(self):
+        """
+        PCA pipeline entry point.
+
+        Channel selection
+        -----------------
+        In fecgsyndb, channels 0–3 are the abdominal (fetal-rich) leads.
+        PCA operates entirely on these — no thoracic reference is needed.
+
+        Setting k
+        ---------
+        k=1  : removes the single dominant maternal component (recommended start)
+        k=2  : removes two components (useful if maternal signal spans 2 PCs,
+                e.g. due to respiration or multiple foetuses)
+        k>=M : illegal — would zero the entire signal
+
+        Block size
+        ----------
+        PCA needs enough samples to form a reliable covariance estimate.
+        Setting block_size = num_samples processes the signal as a single batch,
+        which gives the cleanest separation. Using smaller blocks (e.g. 1–2 s)
+        allows quasi-adaptive behavior but may degrade separation at block edges.
+
+        Plot window
+        -----------
+        t0/t1 control the zoomed time-domain view. Set to [0, total_duration]
+        to see the full signal; zoom in to inspect individual heartbeats.
+        """
+
+        # =====================================================================
+        # CONFIG
+        # =====================================================================
+
+        # Abdominal channel indices (fetal-rich leads in fecgsyndb)
+        # Channels 0–3 are the standard abdominal leads.
+        a_chs       = [0, 1, 2]
+
+        # Number of PCs to suppress (maternal rank).
+        # k=1 is almost always sufficient; try k=2 if maternal residual remains.
+        k           = 2
+
+        num_samples = 7500 * 2   # total samples (~2 s at 1 kHz fs)
+        noise       = True
+        pure_name   = "fecg1"
+        block_size  = 1024
+
+        # Plot window (seconds). Use [0, num_samples/fs] for full signal view.
+        t0, t1 = 0.0, num_samples / 1000.0   # assumes fs=1 kHz; adjust if needed
+
+        # =====================================================================
+        # Load abdominal channels
+        # =====================================================================
+        self.load_data_pca(
+            a_chs=a_chs,
+            num_samples=num_samples,
+            noise=noise,
+            pure_name=pure_name,
+        )
+
+        # =====================================================================
+        # Instantiate and run PCA filter
+        # =====================================================================
+        pca_filter = PCA_Filter(k=k, num_a_channels=len(a_chs))
+
+        self.run_filter_pca(
+            filter_name=f"PCA_Filter(k={k}, M={len(a_chs)})",
+            filter_obj=pca_filter,
+            block_size=block_size,
+            start=t0,
+            end=t1,
+            do_plot=True,
+            do_corr=True,
+        )
+
 
 # =============================================================================
 # Script entry point
@@ -919,5 +1363,6 @@ class Tests:
 if __name__ == "__main__":
     print(f"[INFO] Using data path: {DATA_PATH}")
     t = Tests(partial_path=DATA_PATH)
-    t.run_tests()
-    t.run_tests_multi()
+    #t.run_tests()
+    #t.run_tests_multi()
+    t.run_tests_pca()
