@@ -1,5 +1,7 @@
 # Non-Invasive Fetal ECG Extraction
 
+[Report PDF](https://drive.google.com/file/d/11egdMV3D9gyTRkDVEhRNe7G7Fpi5fR1L/view?usp=drive_link)
+
 Companion code for the report *"Non-Invasive Fetal ECG Extraction: A Comparison of Time-Domain Adaptive Filtering Methods"*, written for ELECT\_ENG 495 — Cardiovascular Instrumentation at Northwestern University (March 2026).
 
 > **Note:** This repository reflects a version of the work extended after the course submission to include a **PCA-based extraction method** as an additional baseline. The original report covered only adaptive filtering (LMS, NLMS, RLS and their multichannel variants). The PCA section and the associated code in `filters.py` and `tests.py` were added post-submission.
